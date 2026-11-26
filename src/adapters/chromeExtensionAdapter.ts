@@ -23,6 +23,7 @@ import type {
   RunSandboxResult,
   SemanticSnapshot,
   ToolInvocationContext,
+  WebSearchEngine,
   WebSearchResult,
 } from '../types.js';
 import type {
@@ -77,6 +78,10 @@ export interface ChromeExtensionAdapterOptions {
   chromeApi?: ChromeApiBindings;
   /** Optional override for host permission check (`https` wildcard). */
   hasPermission?: () => Promise<boolean>;
+  /** Prefer headless HTTP fetch (`html.duckduckgo.com` / `lite.duckduckgo.com`) before browser SERP tabs (default true). */
+  preferHeadlessFetch?: boolean;
+  /** Default search engine for headless search and background tab fallback (default 'ddg'). */
+  defaultEngine?: WebSearchEngine;
   /** Optional Chromium hidden-window SERP provider. */
   searchViaChromiumSerp?: WebSearchDeps['searchViaChromiumSerp'];
   /** Optional custom fetch implementation. */
@@ -409,6 +414,8 @@ export class ChromeExtensionAdapter implements ToolHostAdapter {
 
     const searchDeps: WebSearchDeps = {
       hasPermission: async () => true,
+      preferHeadlessFetch: this.options.preferHeadlessFetch,
+      defaultEngine: this.options.defaultEngine,
       searchViaChromiumSerp: this.options.searchViaChromiumSerp,
       fetchFn: this.options.fetchFn,
       openHiddenTabAndExtract: this.options.openHiddenTabAndExtract,
@@ -432,15 +439,15 @@ export class ChromeExtensionAdapter implements ToolHostAdapter {
       .map((r, i) => `${i + 1}. ${r.title}\n   URL: ${r.url}\n   ${r.snippet}`)
       .join('\n\n');
 
-    const readTopN =
-      options.read_top_n ??
-      (this.options.searchViaChromiumSerp || this.options.openHiddenTabAndExtract ? 2 : 0);
+    const hasScrapeTransport = Boolean(
+      this.options.fetchFn ||
+        typeof globalThis.fetch === 'function' ||
+        this.options.searchViaChromiumSerp ||
+        this.options.openHiddenTabAndExtract,
+    );
+    const readTopN = options.read_top_n ?? (hasScrapeTransport ? 2 : 0);
 
-    if (
-      readTopN > 0 &&
-      res.results.length > 0 &&
-      (this.options.searchViaChromiumSerp || this.options.openHiddenTabAndExtract || options.read_top_n !== undefined)
-    ) {
+    if (readTopN > 0 && res.results.length > 0 && (hasScrapeTransport || options.read_top_n !== undefined)) {
       const pickedUrls: string[] = [];
       const seenDomains = new Set<string>();
       for (const item of res.results) {

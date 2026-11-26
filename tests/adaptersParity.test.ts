@@ -1,5 +1,5 @@
 import { JSDOM } from 'jsdom';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   ChromeExtensionAdapter,
   InMemoryMemoryProvider,
@@ -245,5 +245,129 @@ describe('Dual-Adapter Parity: ChromeExtensionAdapter <-> WebDemoAdapter', () =>
     });
     expect(lockedFetch.ok).toBe(false);
     expect(lockedFetch.needsPermission).toBe(true);
+  });
+
+  it('ChromeExtensionAdapter.searchWebTab uses headless DuckDuckGo and scrapes top sources via fetchFn without opening tabs', async () => {
+    const requestedUrls: string[] = [];
+    const fetchFn = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (url.includes('html.duckduckgo.com')) {
+        return new Response(
+          [
+            `<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fyours.sh%2Fguide">Yours Guide</a><a class="result__snippet">Guide snippet</a>`,
+            `<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fyours.sh%2Fduplicate">Duplicate Domain</a><a class="result__snippet">Should skip duplicate domain</a>`,
+            `<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fdeveloper.mozilla.org%2Fwebgpu">MDN WebGPU</a><a class="result__snippet">MDN snippet</a>`,
+          ].join(''),
+          { status: 200, headers: { 'content-type': 'text/html' } },
+        );
+      }
+      if (url === 'https://yours.sh/guide') {
+        return new Response(
+          `<html><head><title>Yours Guide</title></head><body><main><h1>WebGPU Guide</h1><p>Running local inference cleanly in MV3 without opening background windows or browser tabs during standard web search and page extraction across Chromium extensions and web demos.</p><p>BM25 passage ranking selects the most relevant sections within strict token budgets.</p></main></body></html>`,
+          { status: 200, headers: { 'content-type': 'text/html' } },
+        );
+      }
+      if (url === 'https://developer.mozilla.org/webgpu') {
+        return new Response(
+          `<html><head><title>MDN WebGPU</title></head><body><main><h1>WebGPU API</h1><p>GPU compute shaders and pipelines in browsers allow parallel matrix operations, subgroup operations, and hardware-accelerated neural network inference directly on the client device.</p><p>Applications request a GPUAdapter and GPUDevice to compile WGSL shader modules and dispatch compute passes.</p></main></body></html>`,
+          { status: 200, headers: { 'content-type': 'text/html' } },
+        );
+      }
+      return new Response('Not Found', { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const searchViaChromiumSerp = vi.fn(async () => ({
+      ok: true,
+      engine: 'bing' as const,
+      query: 'webgpu',
+      results: [],
+      elapsedMs: 10,
+    }));
+    const openHiddenTabAndExtract = vi.fn(async () => ({ html: '' }));
+
+    const adapter = new ChromeExtensionAdapter({
+      hasPermission: async () => true,
+      fetchFn,
+      searchViaChromiumSerp,
+      openHiddenTabAndExtract,
+    });
+
+    const outcome = await adapter.searchWebTab(
+      'webgpu',
+      { max_results: 5 },
+      { environment: 'chrome-mv3', sessionId: 'test-session' },
+    );
+
+    expect(outcome.ok).toBe(true);
+    expect(outcome.data?.engine).toBe('ddg');
+    expect(outcome.data?.fromHiddenTab).toBe(false);
+    expect(outcome.data?.results).toHaveLength(3);
+    expect(outcome.data?.scrapedSources).toHaveLength(2);
+    expect(outcome.data?.scrapedSources?.map((s) => s.url)).toEqual([
+      'https://yours.sh/guide',
+      'https://developer.mozilla.org/webgpu',
+    ]);
+    expect(outcome.formatted).toContain('## Top Source Excerpts');
+    expect(outcome.formatted).toContain('Running local inference cleanly in MV3');
+    expect(outcome.formatted).toContain('GPU compute shaders and pipelines in browsers');
+    expect(requestedUrls).toEqual([
+      'https://html.duckduckgo.com/html/?q=webgpu',
+      'https://yours.sh/guide',
+      'https://developer.mozilla.org/webgpu',
+    ]);
+    expect(searchViaChromiumSerp).not.toHaveBeenCalled();
+    expect(openHiddenTabAndExtract).not.toHaveBeenCalled();
+  });
+
+  it('ChromeExtensionAdapter.searchWebTab forwards preferHeadlessFetch and defaultEngine options', async () => {
+    const serpMock = vi.fn(async (query: string) => ({
+      ok: true,
+      engine: 'bing' as const,
+      query,
+      results: [
+        {
+          title: 'Chromium Result',
+          url: 'https://yours.sh/chromium-doc',
+          snippet: 'Chromium snippet',
+          domain: 'yours.sh',
+        },
+      ],
+      elapsedMs: 15,
+    }));
+
+    const fetchedUrls: string[] = [];
+    const fetchFn = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      fetchedUrls.push(url);
+      if (url === 'https://yours.sh/chromium-doc') {
+        return new Response(
+          `<html><head><title>Chromium Doc</title></head><body><main><p>Scraped from top SERP hit.</p></main></body></html>`,
+          { status: 200, headers: { 'content-type': 'text/html' } },
+        );
+      }
+      return new Response('', { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const adapter = new ChromeExtensionAdapter({
+      hasPermission: async () => true,
+      preferHeadlessFetch: false,
+      defaultEngine: 'bing',
+      searchViaChromiumSerp: serpMock,
+      fetchFn,
+    });
+
+    const outcome = await adapter.searchWebTab(
+      'webgpu',
+      { max_results: 3 },
+      { environment: 'chrome-mv3', sessionId: 'test-session' },
+    );
+
+    expect(outcome.ok).toBe(true);
+    expect(serpMock).toHaveBeenCalledTimes(1);
+    expect(outcome.data?.engine).toBe('bing');
+    expect(outcome.data?.fromHiddenTab).toBe(true);
+    expect(outcome.data?.scrapedSources).toHaveLength(1);
+    expect(fetchedUrls).toEqual(['https://yours.sh/chromium-doc']);
   });
 });
