@@ -436,7 +436,10 @@ export class ChromeExtensionAdapter implements ToolHostAdapter {
     }
 
     const formattedResults = res.results
-      .map((r, i) => `${i + 1}. ${r.title}\n   URL: ${r.url}\n   ${r.snippet}`)
+      .map((r, i) => {
+        const snippet = r.snippet.replace(/\s+/g, ' ').trim().slice(0, 200);
+        return `${i + 1}. ${r.title}\n   URL: ${r.url}\n   ${snippet}`;
+      })
       .join('\n\n');
 
     const hasScrapeTransport = Boolean(
@@ -460,7 +463,7 @@ export class ChromeExtensionAdapter implements ToolHostAdapter {
       if (pickedUrls.length > 0) {
         const scraped = await runFetchAndReadUrls(pickedUrls, {
           query,
-          maxCharsPerSource: 2600,
+          maxCharsPerSource: 1250,
           concurrency: 3,
           onSourceReady: this.options.onSourceReady,
           deps: {
@@ -474,7 +477,10 @@ export class ChromeExtensionAdapter implements ToolHostAdapter {
         res.scrapedSources = usable;
         if (usable.length > 0) {
           const excerptBlock = usable
-            .map((s) => `### ${s.title || s.url}\nURL: ${s.url}\n\n${s.excerpt}`)
+            .map((s) => {
+              const compactExcerpt = s.excerpt.replace(/\n{3,}/g, '\n\n').trim();
+              return `### ${s.title || s.url}\nURL: ${s.url}\n\n${compactExcerpt}`;
+            })
             .join('\n\n---\n\n');
           return {
             ok: true,
