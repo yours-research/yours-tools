@@ -463,7 +463,7 @@ export class ChromeExtensionAdapter implements ToolHostAdapter {
       if (pickedUrls.length > 0) {
         const scraped = await runFetchAndReadUrls(pickedUrls, {
           query,
-          maxCharsPerSource: 850,
+          maxCharsPerSource: 650,
           concurrency: 3,
           onSourceReady: this.options.onSourceReady,
           deps: {
