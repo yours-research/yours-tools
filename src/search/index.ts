@@ -4,8 +4,10 @@ export {
   parseBingWebHtmlResults,
   parseDuckDuckGoHtmlResults,
   parseStartpageHtmlResults,
+  runHeadlessFetchSearch,
   runWebSearch,
   unwrapBingRedirectUrl,
+  type HeadlessFetchSearchOptions,
   type WebSearchDeps,
 } from './webSearch.js';
 export {

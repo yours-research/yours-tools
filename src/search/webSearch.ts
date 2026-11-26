@@ -3,6 +3,7 @@ import type {
   ChromiumSerpResponse,
   HiddenTabHtmlResponse,
   SearchResultItem,
+  WebSearchEngine,
   WebSearchResult,
 } from '../types.js';
 
@@ -272,10 +273,181 @@ export function parseStartpageHtmlResults(html: string, limit = 5): SearchResult
 
 export interface WebSearchDeps {
   hasPermission?: () => Promise<boolean>;
+  /** Default search engine order (defaults to `'ddg'`). */
+  defaultEngine?: WebSearchEngine;
+  /** Prefer headless HTTP fetch before browser/Chromium SERP tabs (defaults to `true`). */
+  preferHeadlessFetch?: boolean;
   searchViaChromiumSerp?: (query: string, limit: number) => Promise<ChromiumSerpResponse>;
   fetchFn?: typeof fetch;
   openHiddenTabAndExtract?: (url: string) => Promise<HiddenTabHtmlResponse>;
   timeoutMs?: number;
+}
+
+export interface HeadlessFetchSearchOptions {
+  fetchFn?: typeof fetch;
+  timeoutMs?: number;
+  defaultEngine?: WebSearchEngine;
+}
+
+interface SearchEndpointSpec {
+  engine: WebSearchEngine;
+  url: string;
+  parse: (html: string, limit: number) => SearchResultItem[];
+}
+
+function getEngineEndpoint(engine: WebSearchEngine, encodedQuery: string): SearchEndpointSpec {
+  switch (engine) {
+    case 'bing':
+      return {
+        engine: 'bing',
+        url: `https://www.bing.com/search?q=${encodedQuery}`,
+        parse: parseBingWebHtmlResults,
+      };
+    case 'startpage':
+      return {
+        engine: 'startpage',
+        url: `https://www.startpage.com/sp/search?query=${encodedQuery}`,
+        parse: parseStartpageHtmlResults,
+      };
+    case 'ddg':
+    default:
+      return {
+        engine: 'ddg',
+        url: `https://html.duckduckgo.com/html/?q=${encodedQuery}`,
+        parse: parseDuckDuckGoHtmlResults,
+      };
+  }
+}
+
+function getHeadlessCandidates(defaultEngine: WebSearchEngine, encodedQuery: string): SearchEndpointSpec[] {
+  const ddgHtml = getEngineEndpoint('ddg', encodedQuery);
+  const ddgLite: SearchEndpointSpec = {
+    engine: 'ddg',
+    url: `https://lite.duckduckgo.com/lite/?q=${encodedQuery}`,
+    parse: parseDuckDuckGoHtmlResults,
+  };
+
+  if (defaultEngine === 'bing') {
+    return [getEngineEndpoint('bing', encodedQuery), ddgHtml, ddgLite];
+  }
+  if (defaultEngine === 'startpage') {
+    return [getEngineEndpoint('startpage', encodedQuery), ddgHtml, ddgLite];
+  }
+  return [ddgHtml, ddgLite];
+}
+
+async function fetchEndpointHtml(
+  url: string,
+  fetchFn: typeof fetch,
+  timeoutMs: number,
+): Promise<{ status: number; html: string }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetchFn(url, {
+      method: 'GET',
+      signal: controller.signal,
+      headers: { Accept: 'text/html,application/xhtml+xml' },
+    });
+    const html = await response.text();
+    return { status: response.status, html };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Execute headless HTTP search (DuckDuckGo HTML -> Lite by default, or Bing/Startpage first
+ * when configured) without opening Chromium windows or background tabs.
+ */
+export async function runHeadlessFetchSearch(
+  query: string,
+  limit = 5,
+  options: HeadlessFetchSearchOptions = {},
+): Promise<WebSearchResult> {
+  const cleanQuery = query.trim();
+  const clampedLimit = Math.max(1, Math.min(10, Math.round(limit)));
+  if (!cleanQuery) {
+    return { ok: false, query: cleanQuery, results: [], error: 'Search query cannot be empty.' };
+  }
+
+  const startMs = Date.now();
+  const defaultEngine: WebSearchEngine = options.defaultEngine ?? 'ddg';
+  const fetchFn = options.fetchFn ?? (typeof globalThis.fetch === 'function' ? globalThis.fetch : undefined);
+  const timeoutMs = options.timeoutMs ?? 10000;
+  const candidates = getHeadlessCandidates(defaultEngine, encodeURIComponent(cleanQuery));
+  const primaryUrl = candidates[0].url;
+
+  if (!fetchFn) {
+    return {
+      ok: false,
+      query: cleanQuery,
+      results: [],
+      fromHiddenTab: false,
+      engine: defaultEngine,
+      elapsedMs: Date.now() - startMs,
+      manualUrl: primaryUrl,
+      error: 'Fetch API is unavailable for headless search.',
+    };
+  }
+
+  let lastStatus: number | undefined;
+  let lastError: string | undefined;
+  let blockedCount = 0;
+
+  for (const candidate of candidates) {
+    try {
+      const { status, html } = await fetchEndpointHtml(candidate.url, fetchFn, timeoutMs);
+      lastStatus = status;
+
+      // DuckDuckGo uses HTTP 202 for anomaly/bot challenges; only treat standard 2xx/3xx as OK.
+      if (status >= 200 && status < 400 && status !== 202) {
+        const parsed = candidate.parse(html, clampedLimit);
+        if (parsed.length > 0) {
+          return {
+            ok: true,
+            query: cleanQuery,
+            results: parsed,
+            fromHiddenTab: false,
+            engine: candidate.engine,
+            elapsedMs: Date.now() - startMs,
+          };
+        }
+      }
+
+      if (detectAntiBotChallenge(html, status)) {
+        blockedCount += 1;
+      }
+    } catch (err: unknown) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  if (blockedCount === candidates.length) {
+    return {
+      ok: false,
+      query: cleanQuery,
+      results: [],
+      fromHiddenTab: false,
+      engine: defaultEngine,
+      elapsedMs: Date.now() - startMs,
+      blockedByCaptcha: true,
+      manualUrl: primaryUrl,
+      error: 'Search returned an anti-bot/CAPTCHA challenge. Open manually.',
+    };
+  }
+
+  return {
+    ok: false,
+    query: cleanQuery,
+    results: [],
+    fromHiddenTab: false,
+    engine: defaultEngine,
+    elapsedMs: Date.now() - startMs,
+    error: lastStatus
+      ? `Search request failed with status ${lastStatus} and returned 0 results.`
+      : lastError ?? 'Search request failed or returned 0 results.',
+  };
 }
 
 export async function runWebSearch(
@@ -301,72 +473,82 @@ export async function runWebSearch(
     };
   }
 
-  if (deps?.searchViaChromiumSerp) {
-    try {
-      const serp = await deps.searchViaChromiumSerp(cleanQuery, clampedLimit);
-      return {
-        ok: serp.ok,
-        query: cleanQuery,
-        results: serp.results ?? [],
-        fromHiddenTab: true,
-        engine: serp.engine,
-        elapsedMs: serp.elapsedMs,
-        ...(serp.blockedByCaptcha ? { blockedByCaptcha: true, manualUrl: serp.manualUrl } : {}),
-        ...(serp.error ? { error: serp.error } : {}),
-      };
-    } catch (err: unknown) {
-      return {
-        ok: false,
-        query: cleanQuery,
-        results: [],
-        fromHiddenTab: true,
-        error: err instanceof Error ? err.message : String(err),
-      };
+  const preferHeadlessFetch = deps?.preferHeadlessFetch !== false;
+  const defaultEngine: WebSearchEngine = deps?.defaultEngine ?? 'ddg';
+  const fetchFn = deps?.fetchFn ?? (typeof globalThis.fetch === 'function' ? globalThis.fetch : undefined);
+  const timeoutMs = deps?.timeoutMs ?? 10000;
+  const primaryEndpoint = getEngineEndpoint(defaultEngine, encodeURIComponent(cleanQuery));
+  const searchUrl = primaryEndpoint.url;
+
+  let headlessOutcome: WebSearchResult | undefined;
+  if (preferHeadlessFetch && fetchFn) {
+    headlessOutcome = await runHeadlessFetchSearch(cleanQuery, clampedLimit, {
+      fetchFn,
+      timeoutMs,
+      defaultEngine,
+    });
+    if (headlessOutcome.ok && headlessOutcome.results.length > 0) {
+      return headlessOutcome;
     }
   }
 
-  const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(cleanQuery)}`;
-  const fetchFn = deps?.fetchFn ?? globalThis.fetch;
-  const timeoutMs = deps?.timeoutMs ?? 10000;
-
-  let pathAStatus: number | undefined;
-  let pathAHtml = '';
-
-  if (fetchFn) {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
-      try {
-        const response = await fetchFn(searchUrl, {
-          method: 'GET',
-          signal: controller.signal,
-          headers: { Accept: 'text/html,application/xhtml+xml' },
-        });
-        pathAStatus = response.status;
-        pathAHtml = await response.text();
-      } finally {
-        clearTimeout(timer);
+  const blockedFallbackMeta = headlessOutcome?.blockedByCaptcha
+    ? {
+        blockedByCaptcha: true as const,
+        manualUrl: headlessOutcome.manualUrl ?? searchUrl,
       }
+    : {};
 
-      if (detectAntiBotChallenge(pathAHtml, pathAStatus)) {
+  if (deps?.searchViaChromiumSerp) {
+    try {
+      const serp = await deps.searchViaChromiumSerp(cleanQuery, clampedLimit);
+      const results = serp.results ?? [];
+      if (serp.ok && results.length > 0) {
+        return {
+          ok: true,
+          query: cleanQuery,
+          results,
+          fromHiddenTab: true,
+          engine: serp.engine,
+          elapsedMs: serp.elapsedMs,
+        };
+      }
+      if (serp.blockedByCaptcha) {
+        return {
+          ok: false,
+          query: cleanQuery,
+          results,
+          fromHiddenTab: true,
+          engine: serp.engine,
+          elapsedMs: serp.elapsedMs,
+          blockedByCaptcha: true,
+          manualUrl: serp.manualUrl ?? headlessOutcome?.manualUrl ?? searchUrl,
+          error: serp.error ?? 'Search returned an anti-bot/CAPTCHA challenge. Open manually.',
+        };
+      }
+      if (!deps.openHiddenTabAndExtract) {
+        return {
+          ok: serp.ok,
+          query: cleanQuery,
+          results,
+          fromHiddenTab: true,
+          engine: serp.engine,
+          elapsedMs: serp.elapsedMs,
+          ...blockedFallbackMeta,
+          ...(serp.error ? { error: serp.error } : {}),
+        };
+      }
+    } catch (err: unknown) {
+      if (!deps.openHiddenTabAndExtract) {
         return {
           ok: false,
           query: cleanQuery,
           results: [],
-          blockedByCaptcha: true,
-          manualUrl: searchUrl,
-          error: 'Search returned an anti-bot/CAPTCHA challenge. Open manually.',
+          fromHiddenTab: true,
+          ...blockedFallbackMeta,
+          error: err instanceof Error ? err.message : String(err),
         };
       }
-
-      if (pathAStatus >= 200 && pathAStatus < 400) {
-        const parsed = parseDuckDuckGoHtmlResults(pathAHtml, clampedLimit);
-        if (parsed.length > 0) {
-          return { ok: true, query: cleanQuery, results: parsed, fromHiddenTab: false };
-        }
-      }
-    } catch {
-      // Fall through to hidden-tab fallback
     }
   }
 
@@ -384,12 +566,14 @@ export async function runWebSearch(
           error: 'Search blocked by anti-bot/CAPTCHA challenge in background tab.',
         };
       }
-      const parsed = parseDuckDuckGoHtmlResults(tabRes.html, clampedLimit);
+      const parsed = primaryEndpoint.parse(tabRes.html, clampedLimit);
       return {
         ok: parsed.length > 0,
         query: cleanQuery,
         results: parsed,
         fromHiddenTab: true,
+        engine: defaultEngine,
+        ...(parsed.length === 0 ? blockedFallbackMeta : {}),
         ...(parsed.length === 0 ? { error: 'No search results found.' } : {}),
       };
     } catch (err: unknown) {
@@ -398,17 +582,20 @@ export async function runWebSearch(
         query: cleanQuery,
         results: [],
         fromHiddenTab: true,
+        ...blockedFallbackMeta,
         error: err instanceof Error ? err.message : String(err),
       };
     }
+  }
+
+  if (headlessOutcome) {
+    return headlessOutcome;
   }
 
   return {
     ok: false,
     query: cleanQuery,
     results: [],
-    error: pathAStatus
-      ? `Search request failed with status ${pathAStatus} and returned 0 results.`
-      : 'Search request failed or returned 0 results.',
+    error: 'Search request failed or returned 0 results.',
   };
 }

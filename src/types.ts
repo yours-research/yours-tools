@@ -297,6 +297,8 @@ export interface PdfBinaryExtractor {
   }>;
 }
 
+export type WebSearchEngine = 'ddg' | 'bing' | 'startpage';
+
 export interface SearchResultItem {
   title: string;
   url: string;
@@ -306,7 +308,7 @@ export interface SearchResultItem {
 
 export interface ChromiumSerpResponse {
   ok: boolean;
-  engine: 'bing' | 'ddg' | 'startpage';
+  engine: WebSearchEngine;
   query: string;
   results: SearchResultItem[];
   elapsedMs: number;
@@ -320,7 +322,7 @@ export interface WebSearchResult {
   query: string;
   results: SearchResultItem[];
   fromHiddenTab?: boolean;
-  engine?: string;
+  engine?: WebSearchEngine | (string & {});
   elapsedMs?: number;
   scrapedSources?: FetchedSourceResult[];
   needsPermission?: boolean;
