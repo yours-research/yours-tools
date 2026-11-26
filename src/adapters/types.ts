@@ -303,7 +303,7 @@ export class ToolRuntime {
       }
 
       case 'read_active_tab': {
-        const maxChars = (args.max_chars as number) ?? 24000;
+        const maxChars = (args.max_chars as number) ?? 8000;
         const query = typeof args.query === 'string' ? args.query : undefined;
         const outcome = await this.adapter.readActiveTab(
           {
@@ -337,7 +337,7 @@ export class ToolRuntime {
 
       case 'read_tab': {
         const tabId = args.tab_id as number;
-        const maxChars = (args.max_chars as number) ?? 24000;
+        const maxChars = (args.max_chars as number) ?? 8000;
         const query = typeof args.query === 'string' ? args.query : undefined;
         const outcome = await this.adapter.readTab(
           tabId,
@@ -454,7 +454,7 @@ export class ToolRuntime {
 
       case 'fetch_background_tab': {
         const urls = (args.urls as string[]) ?? [args.url as string];
-        const maxChars = (args.max_chars as number) ?? 24000;
+        const maxChars = (args.max_chars as number) ?? 4000;
         const query = typeof args.query === 'string' ? args.query : undefined;
         const outcome = await this.adapter.fetchBackgroundTab(
           { urls, query, max_chars: maxChars },
