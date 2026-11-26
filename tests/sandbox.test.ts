@@ -83,7 +83,7 @@ describe('Air-Gapped Sandbox (run_sandbox / js_calc)', () => {
       timeout_ms: 50,
     });
     expect(infiniteLoop.ok).toBe(false);
-    expect(infiniteLoop.error).toMatch(/timeout|ceiling|exceeded/i);
+    expect(infiniteLoop.error).toMatch(/timed\s*out|timeout|ceiling|exceeded/i);
 
     const memBomb = await runSandbox({
       mode: 'js',
