@@ -395,11 +395,15 @@ export class ToolRuntime {
       case 'run_sandbox': {
         const outcome = await this.adapter.runSandbox(args as unknown as RunSandboxInput, ctx);
         const res = outcome.data;
+        const formatted =
+          outcome.formatted ||
+          res?.formatted ||
+          (outcome.ok ? '' : `Error: ${outcome.error ?? res?.error ?? 'Sandbox execution failed.'}`);
         return {
           ok: outcome.ok,
           toolName: 'run_sandbox',
           data: res,
-          formatted: outcome.formatted ?? res?.formatted ?? '',
+          formatted,
           tainted: false,
           ...(outcome.error ? { error: outcome.error } : res?.error ? { error: res.error } : {}),
         };
