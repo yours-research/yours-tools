@@ -145,8 +145,19 @@ function tokenizeExpr(expr: string): Token[] {
       continue;
     }
     if (/[a-zA-Z_]/.test(ch)) {
-      const m = /^[a-zA-Z_][a-zA-Z0-9_]*/.exec(expr.slice(i));
-      if (m) { tokens.push({ type: 'ident', value: m[0] }); i += m[0].length; continue; }
+      const m = /^[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)?/.exec(expr.slice(i));
+      if (m) {
+        const rawIdent = m[0];
+        const ident = rawIdent.startsWith('Math.') ? rawIdent.slice(5) : rawIdent;
+        tokens.push({ type: 'ident', value: ident });
+        i += rawIdent.length;
+        continue;
+      }
+    }
+    if (ch === '*' && expr[i + 1] === '*') {
+      tokens.push({ type: 'op', value: '^' });
+      i += 2;
+      continue;
     }
     if ('+-*/%^'.includes(ch)) { tokens.push({ type: 'op', value: ch }); i++; continue; }
     if (ch === '(') { tokens.push({ type: 'lparen', value: ch }); i++; continue; }

@@ -73,4 +73,20 @@ describe('Resilient Tool-Call Parser & Streaming Grammar', () => {
     expect(ToolCallJsonGrammar.isValidToolJsonPrefix('{"name": "read_tab", "arguments": {"tab_id": 1')).toBe(true);
     expect(ToolCallJsonGrammar.isValidToolJsonPrefix('{"name": bad}')).toBe(false);
   });
+
+  it('extracts flat top-level arguments and bracketed string tab IDs', () => {
+    const res1 = parseToolCalls('<tool_call>{"name":"read_tab","tab_id": 1877833099, "mode": "article"}</tool_call>');
+    expect(res1.parseErrors).toEqual([]);
+    expect(res1.toolCalls[0]).toMatchObject({
+      name: 'read_tab',
+      arguments: { tab_id: 1877833099, mode: 'article' },
+    });
+
+    const res2 = parseToolCalls('<tool_call>{"name":"read_tab","arguments":{"id":"[42]"}}</tool_call>');
+    expect(res2.parseErrors).toEqual([]);
+    expect(res2.toolCalls[0]).toMatchObject({
+      name: 'read_tab',
+      arguments: { tab_id: 42 },
+    });
+  });
 });

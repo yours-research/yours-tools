@@ -202,7 +202,17 @@ function normalizeParsedEntry(
       : rec;
 
   const rawName = typeof fnObj.name === 'string' ? fnObj.name : '';
-  let rawArgs: unknown = fnObj.arguments ?? fnObj.args ?? fnObj.parameters ?? {};
+  const explicitArgs = fnObj.arguments ?? fnObj.args ?? fnObj.parameters ?? fnObj.input;
+  let rawArgs: unknown = explicitArgs ?? {};
+  if (explicitArgs === undefined) {
+    const flatArgs: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(fnObj)) {
+      if (key !== 'name' && key !== 'function' && key !== 'id' && key !== 'type') {
+        flatArgs[key] = val;
+      }
+    }
+    rawArgs = flatArgs;
+  }
 
   if (typeof rawArgs === 'string') {
     const trimmedArgs = rawArgs.trim();

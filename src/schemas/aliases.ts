@@ -113,11 +113,14 @@ export function normalizeToolArguments(
     }
 
     case 'read_tab': {
-      const rawTabId = args.tab_id ?? args.tabId;
-      const tabId =
-        typeof rawTabId === 'string' && /^\d+$/.test(rawTabId.trim())
-          ? Number.parseInt(rawTabId.trim(), 10)
-          : rawTabId;
+      const rawCandidate = args.tab_id ?? args.tabId ?? args.id ?? args.tab;
+      let tabId: unknown = rawCandidate;
+      if (typeof rawCandidate === 'string') {
+        const cleaned = rawCandidate.trim().replace(/^\[(\d+)\]$/, '$1');
+        if (/^\d+$/.test(cleaned)) {
+          tabId = Number.parseInt(cleaned, 10);
+        }
+      }
       const maxChars = clampInt(args.max_chars ?? args.maxChars, 500, 120000, 24000);
       const includeLinks = toBoolean(args.include_links ?? args.includeLinks, false);
       const rawMode = args.mode;

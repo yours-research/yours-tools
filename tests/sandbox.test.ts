@@ -109,4 +109,20 @@ describe('Air-Gapped Sandbox (run_sandbox / js_calc)', () => {
     expect(res.engine).toBe('quickjs-wasm');
     expect(res.result).toBe(42);
   });
+
+  it('evaluates Math.pow and ** exponentiation directly in expr mode', async () => {
+    const res1 = await runSandbox({
+      mode: 'expr',
+      expression: '12500 * Math.pow(1 + 0.0675 / 12, 12 * 7)',
+    });
+    expect(res1.ok).toBe(true);
+    expect(Number(res1.result)).toBeCloseTo(20023.4623, 3);
+
+    const res2 = await runSandbox({
+      mode: 'expr',
+      expression: 'round(12500 * (1 + 0.0675 / 12) ** (12 * 7), 2)',
+    });
+    expect(res2.ok).toBe(true);
+    expect(res2.result).toBe(20023.46);
+  });
 });
