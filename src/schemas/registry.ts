@@ -21,7 +21,7 @@ export const CANONICAL_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
           type: 'integer',
           minimum: 500,
           maximum: 120000,
-          default: 24000,
+          default: 8000,
           description: 'Maximum character budget to return from the active tab.',
         },
         mode: {
@@ -87,7 +87,7 @@ export const CANONICAL_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
           type: 'integer',
           minimum: 500,
           maximum: 120000,
-          default: 24000,
+          default: 8000,
           description: 'Maximum character budget to return from the tab.',
         },
         mode: {
@@ -376,7 +376,7 @@ export const CANONICAL_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
           type: 'integer',
           minimum: 500,
           maximum: 120000,
-          default: 24000,
+          default: 4000,
           description: 'Maximum character budget to extract from the fetched page(s).',
         },
       },

@@ -437,7 +437,7 @@ export class ChromeExtensionAdapter implements ToolHostAdapter {
 
     const formattedResults = res.results
       .map((r, i) => {
-        const snippet = r.snippet.replace(/\s+/g, ' ').trim().slice(0, 200);
+        const snippet = r.snippet.replace(/\s+/g, ' ').trim().slice(0, 150);
         return `${i + 1}. ${r.title}\n   URL: ${r.url}\n   ${snippet}`;
       })
       .join('\n\n');
@@ -463,7 +463,7 @@ export class ChromeExtensionAdapter implements ToolHostAdapter {
       if (pickedUrls.length > 0) {
         const scraped = await runFetchAndReadUrls(pickedUrls, {
           query,
-          maxCharsPerSource: 1250,
+          maxCharsPerSource: 850,
           concurrency: 3,
           onSourceReady: this.options.onSourceReady,
           deps: {
@@ -527,7 +527,8 @@ export class ChromeExtensionAdapter implements ToolHostAdapter {
         if (s.error) {
           return `### ${s.url}\nError: ${s.error}${s.manualUrl ? ` (Manual URL: ${s.manualUrl})` : ''}`;
         }
-        return `### ${s.title || s.url}\nURL: ${s.url}\n\n${s.excerpt}`;
+        const compactExcerpt = s.excerpt.replace(/\n{3,}/g, '\n\n').trim();
+        return `### ${s.title || s.url}\nURL: ${s.url}\n\n${compactExcerpt}`;
       })
       .join('\n\n---\n\n');
 

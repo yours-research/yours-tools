@@ -243,7 +243,7 @@ export async function runFetchAndReadUrls(
   }
 
   const query = options?.query ?? '';
-  const maxCharsPerSource = options?.maxCharsPerSource ?? 4800;
+  const maxCharsPerSource = options?.maxCharsPerSource ?? 3200;
   const concurrency = Math.max(1, Math.min(5, options?.concurrency ?? 3));
 
   const results: FetchedSourceResult[] = new Array(targetUrls.length);

@@ -133,4 +133,11 @@ describe('Canonical Schema Registry v1.1 & Alias Resolver', () => {
     expect(promptXml.startsWith('<tools>')).toBe(true);
     expect(promptXml.includes('"interact_page"')).toBe(true);
   });
+
+  it('uses bounded local-context default max_chars caps while preserving 120000 ceiling', () => {
+    expect((getToolDefinition('read_active_tab').parameters.properties?.max_chars as { default?: number }).default).toBe(8000);
+    expect((getToolDefinition('read_tab').parameters.properties?.max_chars as { default?: number }).default).toBe(8000);
+    expect((getToolDefinition('fetch_background_tab').parameters.properties?.max_chars as { default?: number }).default).toBe(4000);
+    expect((getToolDefinition('fetch_background_tab').parameters.properties?.max_chars as { maximum?: number }).maximum).toBe(120000);
+  });
 });
