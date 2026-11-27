@@ -47,10 +47,99 @@ export function decodeHtmlEntities(input: string): string {
   });
 }
 
+const QUOTE_AWARE_TAG_RE = /<(?:[^>"']|"[^"]*"|'[^']*')*>/g;
+
+function stripHtmlTagsQuoteAware(input: string, replacement = ' '): string {
+  return input.replace(QUOTE_AWARE_TAG_RE, replacement);
+}
+
 function stripTagsQuick(html: string): string {
-  return decodeHtmlEntities(html.replace(/<[^>]+>/g, ' '))
+  return decodeHtmlEntities(stripHtmlTagsQuoteAware(html, ' '))
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function isDecorativeSymbolLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  if (/^[-*_]{3,}$/.test(trimmed)) return false;
+  if (trimmed.startsWith('|') && trimmed.endsWith('|')) return false;
+  if (/^#{1,6}\s/.test(trimmed)) return false;
+  const nonWs = Array.from(trimmed.replace(/\s+/g, ''));
+  if (nonWs.length < 6) return false;
+  let nonAlnum = 0;
+  for (const ch of nonWs) {
+    if (!/[\p{L}\p{N}]/u.test(ch)) {
+      nonAlnum++;
+    }
+  }
+  return nonAlnum / nonWs.length > 0.65;
+}
+
+const ATTR_DEBRIS_RE =
+  /^(?:[^<\w]*=\s*(?:\d+(?:\.\d+)?(?:rem|px|em|vw|vh|%)|["'][^"']*["'])|\s*(?:rel|media|data-target|data-[a-z0-9-]+|href|src|srcset|crossorigin|integrity|sizes|as|type)=["'][^"']*["'])/i;
+
+function isAttributeFragmentDebrisLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  if (ATTR_DEBRIS_RE.test(trimmed)) return true;
+  if (
+    /(?:^|[\s)"'])\b(?:rel|media|data-target|crossorigin|srcset)=["'][^"']+["']/.test(trimmed) &&
+    (/(?:\/?>|\bwidth\s*>=?\s*\d)/.test(trimmed) || !/[.!?]\s/.test(trimmed))
+  ) {
+    return true;
+  }
+  return false;
+}
+
+export function cleanExtractedTextLines(text: string): string {
+  const lines = text
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((line) => line.replace(/[ \t]+/g, ' ').trim())
+    .filter((line) => {
+      if (!line) return true;
+      if (isAttributeFragmentDebrisLine(line)) return false;
+      if (isDecorativeSymbolLine(line)) return false;
+      return true;
+    });
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+export function extractCleanSourceSnippet(
+  candidates: Array<string | undefined>,
+  maxChars = 240,
+): string {
+  for (const raw of candidates) {
+    if (!raw || typeof raw !== 'string') continue;
+    const withoutTags = decodeHtmlEntities(stripHtmlTagsQuoteAware(raw, ' '));
+    const withoutMd = withoutTags
+      .replace(/```[\s\S]*?```/g, ' ')
+      .replace(/\[([^\]]+)\]\((?:[^)]+)\)/g, '$1')
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ');
+    const lines = cleanExtractedTextLines(withoutMd)
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => {
+        if (!l) return false;
+        if (/^#{1,6}\s/.test(l)) return false;
+        if (l.startsWith('|') && l.endsWith('|')) return false;
+        if (/^---+$/.test(l)) return false;
+        return l.length >= 16;
+      });
+    for (const line of lines) {
+      const cleaned = line.replace(/^[-*•>\s]+/, '').replace(/\s+/g, ' ').trim();
+      if (cleaned.length < 16 || isDecorativeSymbolLine(cleaned) || isAttributeFragmentDebrisLine(cleaned)) {
+        continue;
+      }
+      if (cleaned.length <= maxChars) return cleaned;
+      const sliced = cleaned.slice(0, maxChars - 1);
+      const lastSpace = sliced.lastIndexOf(' ');
+      const cutoff = lastSpace > maxChars * 0.6 ? lastSpace : maxChars - 1;
+      return `${sliced.slice(0, cutoff).trimEnd()}…`;
+    }
+  }
+  return '';
 }
 
 function findMatchingCloseTag(html: string, tagName: string, openEndIdx: number): number {
@@ -78,7 +167,19 @@ function findMatchingCloseTag(html: string, tagName: string, openEndIdx: number)
         charAfter === '\r' ||
         charAfter === '/'
       ) {
-        const tagEnd = lower.indexOf('>', nextOpen);
+        let tagEnd = -1;
+        let quote: '"' | "'" | null = null;
+        for (let idx = nextOpen + openToken.length; idx < lower.length; idx++) {
+          const ch = lower[idx];
+          if (quote) {
+            if (ch === quote) quote = null;
+          } else if (ch === '"' || ch === "'") {
+            quote = ch;
+          } else if (ch === '>') {
+            tagEnd = idx;
+            break;
+          }
+        }
         if (tagEnd === -1) {
           return -1;
         }
@@ -118,7 +219,7 @@ function findMatchingCloseTag(html: string, tagName: string, openEndIdx: number)
 function removeTagBlocks(html: string, tagNames: string[]): string {
   let out = html;
   for (const tag of tagNames) {
-    const openRegex = new RegExp(`<${tag}(?:\\s[^>]*)?>`, 'gi');
+    const openRegex = new RegExp(`<${tag}(?:\\s+(?:[^>"']|"[^"]*"|'[^']*')*)?>`, 'gi');
     let result = '';
     let lastIndex = 0;
     let match: RegExpExecArray | null;
@@ -153,7 +254,7 @@ const NOISE_ATTR_RE =
   /\b(?:cookie[-_]?(?:banner|consent|notice|bar|popup|modal|wall)|gdpr[-_]?(?:banner|consent|modal)|onetrust|cookiebot|ad[-_]?(?:slot|banner|container|wrapper|unit|box)|adsbygoogle|advertisement|sponsored[-_]?content|newsletter[-_]?(?:popup|banner|modal))\b/i;
 
 function removeNoiseAttributeBlocks(html: string): string {
-  const blockTagRegex = /<(div|section|aside|dialog|p)\b([^>]*)>/gi;
+  const blockTagRegex = /<(div|section|aside|dialog|p)\b((?:[^>"']|"[^"]*"|'[^']*')*)>/gi;
   let result = '';
   let lastIndex = 0;
   let match: RegExpExecArray | null;
@@ -306,13 +407,13 @@ function convertInlineHtml(
 ): string {
   let out = fragment;
 
-  out = out.replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, (_m, inner: string) => {
-    const text = decodeHtmlEntities(inner.replace(/<[^>]+>/g, '')).trim();
+  out = out.replace(/<code\b(?:[^>"']|"[^"]*"|'[^']*')*>([\s\S]*?)<\/code>/gi, (_m, inner: string) => {
+    const text = decodeHtmlEntities(stripHtmlTagsQuoteAware(inner, '')).trim();
     return text ? `\`${text.replace(/`/g, "'")}\`` : '';
   });
 
-  out = out.replace(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi, (_m, attrs: string, inner: string) => {
-    const linkText = decodeHtmlEntities(inner.replace(/<[^>]+>/g, ' '))
+  out = out.replace(/<a\b((?:[^>"']|"[^"]*"|'[^']*')*)>([\s\S]*?)<\/a>/gi, (_m, attrs: string, inner: string) => {
+    const linkText = decodeHtmlEntities(stripHtmlTagsQuoteAware(inner, ' '))
       .replace(/\s+/g, ' ')
       .trim();
     if (!linkText) {
@@ -330,12 +431,12 @@ function convertInlineHtml(
     return includeLinks ? `[${linkText}](${resolved})` : linkText;
   });
 
-  out = out.replace(/<(strong|b)\b[^>]*>([\s\S]*?)<\/\1>/gi, (_m, _t, inner: string) => {
-    const text = decodeHtmlEntities(inner.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+  out = out.replace(/<(strong|b)\b(?:[^>"']|"[^"]*"|'[^']*')*>([\s\S]*?)<\/\1>/gi, (_m, _t, inner: string) => {
+    const text = decodeHtmlEntities(stripHtmlTagsQuoteAware(inner, ' ')).replace(/\s+/g, ' ').trim();
     return text ? `**${text}**` : '';
   });
-  out = out.replace(/<(em|i)\b[^>]*>([\s\S]*?)<\/\1>/gi, (_m, _t, inner: string) => {
-    const text = decodeHtmlEntities(inner.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+  out = out.replace(/<(em|i)\b(?:[^>"']|"[^"]*"|'[^']*')*>([\s\S]*?)<\/\1>/gi, (_m, _t, inner: string) => {
+    const text = decodeHtmlEntities(stripHtmlTagsQuoteAware(inner, ' ')).replace(/\s+/g, ' ').trim();
     return text ? `*${text}*` : '';
   });
 
@@ -351,23 +452,25 @@ function htmlFragmentToMarkdown(
   let work = fragment;
 
   const preBlocks: string[] = [];
-  work = work.replace(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi, (_m, inner: string) => {
+  work = work.replace(/<pre\b(?:[^>"']|"[^"]*"|'[^']*')*>([\s\S]*?)<\/pre>/gi, (_m, inner: string) => {
     const langMatch = /class\s*=\s*["'][^"']*language-([a-zA-Z0-9_-]+)/i.exec(inner);
     const lang = langMatch ? langMatch[1] : '';
-    const codeText = decodeHtmlEntities(inner.replace(/<[^>]+>/g, '')).replace(/\r\n/g, '\n').trim();
+    const codeText = decodeHtmlEntities(stripHtmlTagsQuoteAware(inner, '')).replace(/\r\n/g, '\n').trim();
     const token = `\n\n__YOURS_PRE_${preBlocks.length}__\n\n`;
     preBlocks.push(`\`\`\`${lang}\n${codeText}\n\`\`\``);
     return token;
   });
 
-  work = work.replace(/<table\b[^>]*>[\s\S]*?<\/table>/gi, (tableHtml) =>
+  work = work.replace(/<table\b(?:[^>"']|"[^"]*"|'[^']*')*>[\s\S]*?<\/table>/gi, (tableHtml) =>
     convertTableToMarkdown(tableHtml, baseUrl, includeLinks, linksOut),
   );
 
-  work = work.replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi, (_m, levelStr: string, inner: string) => {
+  work = work.replace(/<h([1-6])\b(?:[^>"']|"[^"]*"|'[^']*')*>([\s\S]*?)<\/h\1>/gi, (_m, levelStr: string, inner: string) => {
     const level = Number.parseInt(levelStr, 10);
-    const headingText = convertInlineHtml(inner, baseUrl, includeLinks, linksOut)
-      .replace(/<[^>]+>/g, ' ')
+    const headingText = stripHtmlTagsQuoteAware(
+      convertInlineHtml(inner, baseUrl, includeLinks, linksOut),
+      ' ',
+    )
       .replace(/\s+/g, ' ')
       .trim();
     if (!headingText) {
@@ -376,17 +479,21 @@ function htmlFragmentToMarkdown(
     return `\n\n${'#'.repeat(level)} ${headingText}\n\n`;
   });
 
-  work = work.replace(/<blockquote\b[^>]*>([\s\S]*?)<\/blockquote>/gi, (_m, inner: string) => {
-    const quoteText = convertInlineHtml(inner, baseUrl, includeLinks, linksOut)
-      .replace(/<[^>]+>/g, ' ')
+  work = work.replace(/<blockquote\b(?:[^>"']|"[^"]*"|'[^']*')*>([\s\S]*?)<\/blockquote>/gi, (_m, inner: string) => {
+    const quoteText = stripHtmlTagsQuoteAware(
+      convertInlineHtml(inner, baseUrl, includeLinks, linksOut),
+      ' ',
+    )
       .replace(/\s+/g, ' ')
       .trim();
     return quoteText ? `\n\n> ${quoteText}\n\n` : '';
   });
 
-  work = work.replace(/<li\b[^>]*>([\s\S]*?)<\/li>/gi, (_m, inner: string) => {
-    const itemText = convertInlineHtml(inner, baseUrl, includeLinks, linksOut)
-      .replace(/<[^>]+>/g, ' ')
+  work = work.replace(/<li\b(?:[^>"']|"[^"]*"|'[^']*')*>([\s\S]*?)<\/li>/gi, (_m, inner: string) => {
+    const itemText = stripHtmlTagsQuoteAware(
+      convertInlineHtml(inner, baseUrl, includeLinks, linksOut),
+      ' ',
+    )
       .replace(/\s+/g, ' ')
       .trim();
     return itemText ? `\n- ${itemText}` : '';
@@ -394,20 +501,15 @@ function htmlFragmentToMarkdown(
 
   work = convertInlineHtml(work, baseUrl, includeLinks, linksOut);
 
-  work = work.replace(/<hr\b[^>]*\/?>/gi, '\n\n---\n\n');
-  work = work.replace(/<br\b[^>]*\/?>/gi, '\n');
+  work = work.replace(/<hr\b(?:[^>"']|"[^"]*"|'[^']*')*\/?>/gi, '\n\n---\n\n');
+  work = work.replace(/<br\b(?:[^>"']|"[^"]*"|'[^']*')*\/?>/gi, '\n');
   work = work.replace(/<\/(p|div|section|article|main|ul|ol|dl|dt|dd|figcaption|figure)>/gi, '\n\n');
-  work = work.replace(/<(p|div|section|article|main|ul|ol|dl|dt|dd|figcaption|figure)\b[^>]*>/gi, '\n');
+  work = work.replace(/<(p|div|section|article|main|ul|ol|dl|dt|dd|figcaption|figure)\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi, '\n');
 
-  work = work.replace(/<[^>]+>/g, ' ');
+  work = stripHtmlTagsQuoteAware(work, ' ');
   work = decodeHtmlEntities(work);
 
-  const lines = work
-    .replace(/\r\n?/g, '\n')
-    .split('\n')
-    .map((line) => line.replace(/[ \t]+/g, ' ').trim());
-
-  let normalized = lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  let normalized = cleanExtractedTextLines(work);
 
   for (let i = 0; i < preBlocks.length; i++) {
     normalized = normalized.replace(`__YOURS_PRE_${i}__`, preBlocks[i]);
@@ -455,6 +557,7 @@ export function distillHtmlToMarkdown(
 
   let cleaned = html.replace(/<!--[\s\S]*?-->/g, '');
   cleaned = removeTagBlocks(cleaned, [
+    'head',
     'script',
     'style',
     'noscript',
@@ -652,7 +755,7 @@ export function parseYouTubeTranscriptXml(xml: string, maxChars = 12000): string
     const startMatch = /\bstart\s*=\s*["']([0-9.]+)["']/i.exec(attrs);
     const startSec = startMatch ? Number.parseFloat(startMatch[1]) : 0;
 
-    const decodedOnce = decodeHtmlEntities(rawBody.replace(/<[^>]+>/g, ' '));
+    const decodedOnce = decodeHtmlEntities(stripHtmlTagsQuoteAware(rawBody, ' '));
     const decodedTwice = decodeHtmlEntities(decodedOnce).replace(/\s+/g, ' ').trim();
     if (!decodedTwice) {
       continue;
@@ -667,7 +770,7 @@ export function parseYouTubeTranscriptXml(xml: string, maxChars = 12000): string
       const attrs = match[1];
       const tMatch = /\bt\s*=\s*["']([0-9]+)["']/i.exec(attrs);
       const startSec = tMatch ? Number.parseInt(tMatch[1], 10) / 1000 : 0;
-      const text = decodeHtmlEntities(decodeHtmlEntities(match[2].replace(/<[^>]+>/g, ' ')))
+      const text = decodeHtmlEntities(decodeHtmlEntities(stripHtmlTagsQuoteAware(match[2], ' ')))
         .replace(/\s+/g, ' ')
         .trim();
       if (text) {

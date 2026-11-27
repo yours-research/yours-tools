@@ -15,3 +15,11 @@ export {
   type FetchAndReadOptions,
   type UrlFetcherDeps,
 } from './urlFetcher.js';
+export {
+  DEFAULT_FIRECRAWL_BASE_URL,
+  firecrawlKeylessScrape,
+  firecrawlKeylessSearch,
+  type FirecrawlKeylessOptions,
+  type FirecrawlKeylessScrapeOptions,
+  type FirecrawlKeylessSearchOptions,
+} from './firecrawlKeyless.js';

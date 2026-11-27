@@ -1,8 +1,12 @@
 import { executePageInteraction, formatInteractResult, type InteractPageOptions } from '../actions/interactPage.js';
 import { readDocument } from '../documents/documentReader.js';
-import { distillHtmlToMarkdown } from '../extractors/htmlDistiller.js';
+import { distillHtmlToMarkdown, extractCleanSourceSnippet } from '../extractors/htmlDistiller.js';
 import { extractFromDocument } from '../extractors/pageExtractor.js';
 import { runSandbox } from '../sandbox/sandbox.js';
+import {
+  firecrawlKeylessScrape,
+  firecrawlKeylessSearch,
+} from '../search/firecrawlKeyless.js';
 import { runFetchAndReadUrls } from '../search/urlFetcher.js';
 import { runWebSearch, type WebSearchDeps } from '../search/webSearch.js';
 import type {
@@ -69,6 +73,12 @@ export interface WebDemoAdapterOptions {
   quickJsAdapter?: QuickJsRuntimeAdapter;
   /** Optional interaction options (settleMs, approval callback). */
   interactOptions?: InteractPageOptions;
+  /** Research provider mode (`'default'` headless DDG/fetch, or `'firecrawl-keyless'`). */
+  researchProvider?: 'default' | 'firecrawl-keyless';
+  /** Base URL for Firecrawl Keyless API or same-origin proxy (default `https://api.firecrawl.dev`). */
+  firecrawlBaseUrl?: string;
+  /** Optional callback when a source is ready during search or background fetch. */
+  onSourceReady?: (src: FetchedSourceResult) => void;
 }
 
 /**
@@ -335,6 +345,32 @@ export class WebDemoAdapter implements ToolHostAdapter {
       };
     }
 
+    if (this.options.researchProvider === 'firecrawl-keyless') {
+      const fc = await firecrawlKeylessSearch(query, {
+        firecrawlBaseUrl: this.options.firecrawlBaseUrl,
+        fetchFn: this.options.fetchFn,
+        limit: options.max_results,
+        maxCharsPerSource: 1800,
+      });
+      if (!fc.ok) {
+        return { ok: false, data: fc, error: fc.error };
+      }
+      for (const src of fc.scrapedSources ?? []) {
+        this.options.onSourceReady?.(src);
+      }
+      const formattedResults = fc.results
+        .map((r, i) => `${i + 1}. ${r.title}\n   URL: ${r.url}${r.snippet ? `\n   ${r.snippet}` : ''}`)
+        .join('\n\n');
+      const excerptBlock = (fc.scrapedSources ?? [])
+        .map((s) => `### ${s.title || s.url}\nURL: ${s.url}\n\n${s.excerpt.trim()}`)
+        .join('\n\n---\n\n');
+      return {
+        ok: true,
+        data: fc,
+        formatted: excerptBlock ? `${formattedResults}\n\n## Top Source Excerpts\n\n${excerptBlock}` : formattedResults,
+      };
+    }
+
     const res = await runWebSearch(query, options.max_results, {
       hasPermission: async () => true,
       searchViaChromiumSerp: this.options.searchViaSerp,
@@ -354,6 +390,11 @@ export class WebDemoAdapter implements ToolHostAdapter {
     if (!res.ok) {
       return { ok: false, data: res, error: res.error };
     }
+
+    res.results = res.results.map((r) => ({
+      ...r,
+      snippet: extractCleanSourceSnippet([r.snippet], 240),
+    }));
 
     const formatted = res.results
       .map((r, i) => `${i + 1}. ${r.title}\n   URL: ${r.url}\n   ${r.snippet}`)
@@ -375,15 +416,42 @@ export class WebDemoAdapter implements ToolHostAdapter {
       };
     }
 
-    const sources = await runFetchAndReadUrls(options.urls, {
-      query: options.query,
-      maxCharsPerSource: options.max_chars,
-      deps: {
-        hasPermission: async () => true,
-        fetchFn: this.options.fetchFn,
-        openHiddenTabAndExtract: this.options.openHiddenTabAndExtract,
-      },
-    });
+    const sources =
+      this.options.researchProvider === 'firecrawl-keyless'
+        ? await Promise.all(
+            options.urls.slice(0, 5).map(async (u) => {
+              const s = await firecrawlKeylessScrape(u, {
+                query: options.query,
+                firecrawlBaseUrl: this.options.firecrawlBaseUrl,
+                fetchFn: this.options.fetchFn,
+                maxCharsPerSource: options.max_chars,
+              });
+              this.options.onSourceReady?.(s);
+              return s;
+            }),
+          )
+        : (
+            await runFetchAndReadUrls(options.urls, {
+              query: options.query,
+              maxCharsPerSource: options.max_chars,
+              onSourceReady: this.options.onSourceReady
+                ? (src) => {
+                    this.options.onSourceReady?.({
+                      ...src,
+                      snippet: src.snippet || extractCleanSourceSnippet([src.excerpt, src.markdown], 240),
+                    });
+                  }
+                : undefined,
+              deps: {
+                hasPermission: async () => true,
+                fetchFn: this.options.fetchFn,
+                openHiddenTabAndExtract: this.options.openHiddenTabAndExtract,
+              },
+            })
+          ).map((src) => ({
+            ...src,
+            snippet: src.snippet || extractCleanSourceSnippet([src.excerpt, src.markdown], 240),
+          }));
 
     const anySuccess = sources.some((s) => !s.error && s.excerpt.length > 0);
     const captchaBlocked = sources.find((s) => s.blockedByCaptcha);

@@ -1,10 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   distillHtmlToMarkdown,
+  extractCleanSourceSnippet,
   extractYouTubeCaptionTrack,
   parseYouTubeTranscriptXml,
 } from '../src/extractors/htmlDistiller.js';
+import { ChromeExtensionAdapter, WebDemoAdapter } from '../src/adapters/index.js';
 import { rankPassagesBm25 } from '../src/search/bm25Ranker.js';
+import { firecrawlKeylessScrape, firecrawlKeylessSearch } from '../src/search/firecrawlKeyless.js';
 import {
   detectAntiBotChallenge,
   parseBingWebHtmlResults,
@@ -361,5 +364,168 @@ describe('HTML->Markdown Distiller, BM25 Ranker, and SERP Parsers', () => {
     expect(spRes.engine).toBe('startpage');
     expect(spRes.fromHiddenTab).toBe(false);
     expect(spRes.results[0].url).toBe('https://yours.sh/sp');
+  });
+
+  it('strips Discourse media attributes containing > and <head> stylesheets completely', () => {
+    const html = `
+      <html>
+        <head>
+          <title>HF Forums Pricing</title>
+          <link media="(width >= 40rem)" rel="stylesheet" data-target="discourse-ai_desktop" href="/style.css" />
+        </head>
+        <body>
+          <link media="(width >= 40rem)" rel="stylesheet" data-target="discourse-ai_desktop" />
+          <div data-meta="value > threshold">Should keep paragraph cleanly below.</div>
+          <main>
+            <h1>Hugging Face Pro vs Enterprise</h1>
+            <p>Hugging Face Pro costs $9 per month while Team starts at $20 per user per month.</p>
+          </main>
+        </body>
+      </html>
+    `;
+    const distilled = distillHtmlToMarkdown(html, { baseUrl: 'https://discuss.huggingface.co/t/pricing' });
+    expect(distilled.title).toBe('HF Forums Pricing');
+    expect(distilled.markdown).toContain('Hugging Face Pro costs $9 per month');
+    expect(distilled.markdown).not.toContain('40rem');
+    expect(distilled.markdown).not.toContain('discourse-ai_desktop');
+    expect(distilled.markdown).not.toContain('rel="stylesheet"');
+    expect(distilled.markdown).not.toContain('value > threshold');
+  });
+
+  it('strips decorative Unicode dingbat marquee lines and attribute debris lines', () => {
+    const html = `
+      <html>
+        <body>
+          <main>
+            <p>✳ ◇ · ◎ ✦ → ✳ ◇ · ◎ ✦ →</p>
+            <p>= 40rem)" rel="stylesheet" data-target="discourse-ai_desktop" /></p>
+            <h1>Pricing Plans</h1>
+            <p>Pro Plan includes ZeroGPU priority and 1TB storage.</p>
+          </main>
+        </body>
+      </html>
+    `;
+    const distilled = distillHtmlToMarkdown(html);
+    expect(distilled.markdown).toContain('Pro Plan includes ZeroGPU priority');
+    expect(distilled.markdown).not.toContain('✳');
+    expect(distilled.markdown).not.toContain('40rem');
+
+    const snippet = extractCleanSourceSnippet([
+      '✳ ◇ · ◎ ✦ →',
+      '= 40rem)" rel="stylesheet" data-target="discourse-ai_desktop" />',
+      'Pro costs $9/mo and Teams costs $20/seat/mo for organizations.',
+    ]);
+    expect(snippet).toBe('Pro costs $9/mo and Teams costs $20/seat/mo for organizations.');
+  });
+
+  it('BM25 selects chunk 4 pricing table over score-0 chunk 0 under tight character budget', () => {
+    const chunk0Hero = 'Welcome to our developer platform hero banner introducing collaborative workflows and ecosystem links for software engineering organizations worldwide. '.repeat(3).trim();
+    const chunk1Filler = 'Getting started documentation covers account onboarding, SSO setup, workspace invitations, and role assignments for new workspace members. '.repeat(3).trim();
+    const chunk2Filler = 'Security compliance overview mentions SOC2 type 2 certification, encryption at rest, audit log retention, and regional residency controls. '.repeat(3).trim();
+    const chunk3Filler = 'Community events calendar highlights global meetups, hackathons, open source workshops, and contributor office hours every quarter. '.repeat(3).trim();
+    const chunk4Pricing = '| Plan | Monthly Price | Seats |\n| --- | --- | --- |\n| Pro | $9 | 1 |\n| Teams | $20 | Unlimited |';
+
+    const md = [chunk0Hero, chunk1Filler, chunk2Filler, chunk3Filler, chunk4Pricing].join('\n\n');
+    const ranked = rankPassagesBm25(md, 'Pro vs Teams pricing Monthly Price', 180);
+
+    expect(ranked.totalChunks).toBe(5);
+    expect(ranked.excerpt).toContain('| Pro | $9 | 1 |');
+    expect(ranked.excerpt).toContain('| Teams | $20 | Unlimited |');
+    expect(ranked.excerpt).not.toContain('hero banner');
+  });
+
+  it('ChromeExtensionAdapter searchWebTab allows 1800 chars per scraped source and attaches clean snippets', async () => {
+    const longPricingText = `Pro is $9/month and Team is $20/user/month. ${'Detailed quota benefit row. '.repeat(40)}`;
+    const fetchFn = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('duckduckgo.com')) {
+        return new Response(
+          `<a class="result__a" href="https://huggingface.co/pricing">Hugging Face Pricing</a><a class="result__snippet">✳ ◇ · ◎ ✦ →</a>`,
+          { status: 200 },
+        );
+      }
+      return new Response(
+        `<html><head><title>Pricing</title><link media="(width >= 40rem)" rel="stylesheet" /></head><body><main><p>${longPricingText}</p></main></body></html>`,
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+
+    const adapter = new ChromeExtensionAdapter({
+      hasPermission: async () => true,
+      fetchFn,
+    });
+    const out = await adapter.searchWebTab('Hugging Face Pro Team pricing', { max_results: 3 }, { environment: 'chrome-mv3', sessionId: 's1' });
+    expect(out.ok).toBe(true);
+    const scraped = out.data?.scrapedSources?.[0];
+    expect(scraped).toBeDefined();
+    expect(scraped!.excerpt.length).toBeGreaterThan(650);
+    expect(scraped!.excerpt.length).toBeLessThanOrEqual(1800);
+    expect(scraped!.snippet).toContain('Pro is $9/month');
+    expect(scraped!.snippet).not.toContain('✳');
+    expect(out.data?.results[0]?.snippet).not.toContain('✳');
+  });
+
+  it('firecrawlKeylessSearch, firecrawlKeylessScrape, and WebDemoAdapter handle keyless mode & HTTP 429 cleanly', async () => {
+    let sawAuthHeader = false;
+    const requestedUrls: string[] = [];
+    const fetchFn = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      const headers = new Headers(init?.headers);
+      if (headers.has('authorization')) sawAuthHeader = true;
+
+      if (url === 'https://proxy.example/fc/v1/search') {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            data: [
+              {
+                url: 'https://huggingface.co/pricing',
+                title: 'Pricing - Hugging Face',
+                description: 'Official Pro and Team pricing plans.',
+                markdown: '# Pricing\n\nPro is $9/mo and Team is $20/seat/mo.',
+              },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (url === 'https://api.firecrawl.dev/v1/scrape') {
+        return new Response(JSON.stringify({ error: 'Rate limit exceeded' }), {
+          status: 429,
+          headers: { 'retry-after': '15', 'content-type': 'application/json' },
+        });
+      }
+      return new Response('Not found', { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const searchRes = await firecrawlKeylessSearch('Pro Team pricing', {
+      firecrawlBaseUrl: 'https://proxy.example/fc/',
+      fetchFn,
+    });
+    expect(sawAuthHeader).toBe(false);
+    expect(requestedUrls[0]).toBe('https://proxy.example/fc/v1/search');
+    expect(searchRes.ok).toBe(true);
+    expect(searchRes.results[0].url).toBe('https://huggingface.co/pricing');
+    expect(searchRes.scrapedSources?.[0]?.excerpt).toContain('$9/mo');
+
+    const rateLimited = await firecrawlKeylessScrape('https://huggingface.co/pricing', { fetchFn });
+    expect(rateLimited.rateLimited).toBe(true);
+    expect(rateLimited.error).toContain('429');
+    expect(rateLimited.error).toContain('15s');
+
+    const webAdapter = new WebDemoAdapter({
+      allowNetwork: true,
+      researchProvider: 'firecrawl-keyless',
+      firecrawlBaseUrl: 'https://proxy.example/fc',
+      fetchFn,
+    });
+    const adapterOut = await webAdapter.searchWebTab(
+      'Pro Team pricing',
+      { max_results: 3 },
+      { environment: 'web-demo', sessionId: 'demo-1' },
+    );
+    expect(adapterOut.ok).toBe(true);
+    expect(adapterOut.formatted).toContain('Official Pro and Team pricing plans.');
   });
 });

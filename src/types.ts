@@ -336,6 +336,7 @@ export interface FetchedSourceResult {
   title: string;
   markdown: string;
   excerpt: string;
+  snippet?: string;
   charCount: number;
   fromHiddenTab: boolean;
   error?: string;

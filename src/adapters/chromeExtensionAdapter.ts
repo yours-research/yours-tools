@@ -1,7 +1,10 @@
 import { formatInteractResult, inPageInteractScript } from '../actions/interactPage.js';
 import type { InteractExecutionOutcome } from '../actions/interactPage.js';
 import { readDocument, type ReadDocumentOptions } from '../documents/documentReader.js';
-import { parseYouTubeTranscriptXml } from '../extractors/htmlDistiller.js';
+import {
+  extractCleanSourceSnippet,
+  parseYouTubeTranscriptXml,
+} from '../extractors/htmlDistiller.js';
 import { inPageExtractScript } from '../extractors/pageExtractor.js';
 import { formatSemanticSnapshot, inPageSemanticExtractScript } from '../extractors/semanticAom.js';
 import { runSandbox, type SandboxOptions } from '../sandbox/sandbox.js';
@@ -435,10 +438,17 @@ export class ChromeExtensionAdapter implements ToolHostAdapter {
       return { ok: false, data: res, error: res.error };
     }
 
-    const formattedResults = res.results
+    const cleanedResults = res.results.map((r) => ({
+      ...r,
+      snippet: extractCleanSourceSnippet([r.snippet], 240),
+    }));
+    res.results = cleanedResults;
+    const serpSnippetByUrl = new Map(cleanedResults.map((r) => [r.url, r.snippet]));
+
+    const formattedResults = cleanedResults
       .map((r, i) => {
-        const snippet = r.snippet.replace(/\s+/g, ' ').trim().slice(0, 150);
-        return `${i + 1}. ${r.title}\n   URL: ${r.url}\n   ${snippet}`;
+        const snippet = r.snippet.slice(0, 200);
+        return `${i + 1}. ${r.title}\n   URL: ${r.url}${snippet ? `\n   ${snippet}` : ''}`;
       })
       .join('\n\n');
 
@@ -450,10 +460,10 @@ export class ChromeExtensionAdapter implements ToolHostAdapter {
     );
     const readTopN = options.read_top_n ?? (hasScrapeTransport ? 2 : 0);
 
-    if (readTopN > 0 && res.results.length > 0 && (hasScrapeTransport || options.read_top_n !== undefined)) {
+    if (readTopN > 0 && cleanedResults.length > 0 && (hasScrapeTransport || options.read_top_n !== undefined)) {
       const pickedUrls: string[] = [];
       const seenDomains = new Set<string>();
-      for (const item of res.results) {
+      for (const item of cleanedResults) {
         if (pickedUrls.length >= readTopN) break;
         if (!seenDomains.has(item.domain)) {
           seenDomains.add(item.domain);
@@ -463,9 +473,19 @@ export class ChromeExtensionAdapter implements ToolHostAdapter {
       if (pickedUrls.length > 0) {
         const scraped = await runFetchAndReadUrls(pickedUrls, {
           query,
-          maxCharsPerSource: 650,
+          maxCharsPerSource: 1800,
           concurrency: 3,
-          onSourceReady: this.options.onSourceReady,
+          onSourceReady: this.options.onSourceReady
+            ? (src) => {
+                const enriched: FetchedSourceResult = {
+                  ...src,
+                  snippet:
+                    src.snippet ||
+                    extractCleanSourceSnippet([serpSnippetByUrl.get(src.url), src.excerpt], 240),
+                };
+                this.options.onSourceReady?.(enriched);
+              }
+            : undefined,
           deps: {
             hasPermission: async () => true,
             fetchFn: this.options.fetchFn,
@@ -473,8 +493,21 @@ export class ChromeExtensionAdapter implements ToolHostAdapter {
             timeoutMs: 6500,
           },
         });
-        const usable = scraped.filter((s) => !s.error && s.excerpt.trim().length > 0);
+        const usable = scraped
+          .filter((s) => !s.error && s.excerpt.trim().length > 0)
+          .map((s) => ({
+            ...s,
+            snippet: s.snippet || extractCleanSourceSnippet([serpSnippetByUrl.get(s.url), s.excerpt], 240),
+          }));
         res.scrapedSources = usable;
+        for (const src of usable) {
+          if (src.snippet) {
+            const match = res.results.find((r) => r.url === src.url);
+            if (match && !match.snippet) {
+              match.snippet = src.snippet;
+            }
+          }
+        }
         if (usable.length > 0) {
           const excerptBlock = usable
             .map((s) => {
@@ -513,12 +546,24 @@ export class ChromeExtensionAdapter implements ToolHostAdapter {
       openHiddenTabAndExtract: this.options.openHiddenTabAndExtract,
     };
 
-    const sources = await runFetchAndReadUrls(options.urls, {
+    const rawSources = await runFetchAndReadUrls(options.urls, {
       query: options.query,
       maxCharsPerSource: options.max_chars,
-      onSourceReady: this.options.onSourceReady,
+      onSourceReady: this.options.onSourceReady
+        ? (src) => {
+            const enriched: FetchedSourceResult = {
+              ...src,
+              snippet: src.snippet || extractCleanSourceSnippet([src.excerpt, src.markdown], 240),
+            };
+            this.options.onSourceReady?.(enriched);
+          }
+        : undefined,
       deps: fetcherDeps,
     });
+    const sources = rawSources.map((src) => ({
+      ...src,
+      snippet: src.snippet || extractCleanSourceSnippet([src.excerpt, src.markdown], 240),
+    }));
 
     const anySuccess = sources.some((s) => !s.error && s.excerpt.length > 0);
     const captchaBlocked = sources.find((s) => s.blockedByCaptcha);

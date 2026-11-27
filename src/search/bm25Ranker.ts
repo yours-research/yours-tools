@@ -143,10 +143,6 @@ export function rankPassagesBm25(
 
   const selectedSet = new Set<number>();
   let usedChars = 0;
-  if (chunks[0].length <= maxChars) {
-    selectedSet.add(0);
-    usedChars = chunks[0].length;
-  }
 
   for (const idx of rankedIndices) {
     if (selectedSet.has(idx)) continue;
