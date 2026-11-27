@@ -465,32 +465,50 @@ describe('HTML->Markdown Distiller, BM25 Ranker, and SERP Parsers', () => {
     expect(out.data?.results[0]?.snippet).not.toContain('✳');
   });
 
-  it('firecrawlKeylessSearch, firecrawlKeylessScrape, and WebDemoAdapter handle keyless mode & HTTP 429 cleanly', async () => {
-    let sawAuthHeader = false;
+  it('firecrawlKeylessSearch, firecrawlKeylessScrape, and WebDemoAdapter handle /v2 responses, optional apiKey, and HTTP 429 cleanly', async () => {
+    const authHeaders: Array<string | null> = [];
     const requestedUrls: string[] = [];
+    let returnArrayCompat = false;
     const fetchFn = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       requestedUrls.push(url);
       const headers = new Headers(init?.headers);
-      if (headers.has('authorization')) sawAuthHeader = true;
+      authHeaders.push(headers.get('authorization'));
 
-      if (url === 'https://proxy.example/fc/v1/search') {
+      if (url === 'https://proxy.example/fc/v2/search') {
+        const rows = [
+          {
+            url: 'https://huggingface.co/pricing',
+            title: 'Pricing - Hugging Face',
+            description: 'Official Pro and Team pricing plans.',
+            markdown: '# Pricing\n\nPro is $9/mo and Team is $20/seat/mo.',
+          },
+        ];
         return new Response(
           JSON.stringify({
             success: true,
-            data: [
-              {
-                url: 'https://huggingface.co/pricing',
-                title: 'Pricing - Hugging Face',
-                description: 'Official Pro and Team pricing plans.',
-                markdown: '# Pricing\n\nPro is $9/mo and Team is $20/seat/mo.',
-              },
-            ],
+            data: returnArrayCompat ? rows : { web: rows },
           }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         );
       }
-      if (url === 'https://api.firecrawl.dev/v1/scrape') {
+      if (url === 'https://proxy.example/fc/v2/scrape') {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            data: {
+              markdown: '# Pricing\n\nPro is $9/mo.',
+              metadata: {
+                title: 'Pricing - Hugging Face',
+                sourceURL: 'https://huggingface.co/pricing',
+                description: 'Hugging Face pricing details.',
+              },
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (url === 'https://api.firecrawl.dev/v2/scrape') {
         return new Response(JSON.stringify({ error: 'Rate limit exceeded' }), {
           status: 429,
           headers: { 'retry-after': '15', 'content-type': 'application/json' },
@@ -503,17 +521,38 @@ describe('HTML->Markdown Distiller, BM25 Ranker, and SERP Parsers', () => {
       firecrawlBaseUrl: 'https://proxy.example/fc/',
       fetchFn,
     });
-    expect(sawAuthHeader).toBe(false);
-    expect(requestedUrls[0]).toBe('https://proxy.example/fc/v1/search');
+    expect(authHeaders[0]).toBeNull();
+    expect(requestedUrls[0]).toBe('https://proxy.example/fc/v2/search');
     expect(searchRes.ok).toBe(true);
     expect(searchRes.results[0].url).toBe('https://huggingface.co/pricing');
     expect(searchRes.scrapedSources?.[0]?.excerpt).toContain('$9/mo');
 
+    // Backward-compat Array.isArray(data) fallback + optional apiKey forwarding
+    returnArrayCompat = true;
+    const keyedCompatRes = await firecrawlKeylessSearch('Pro Team pricing', {
+      firecrawlBaseUrl: 'https://proxy.example/fc/',
+      apiKey: 'fc-test-key',
+      fetchFn,
+    });
+    expect(keyedCompatRes.ok).toBe(true);
+    expect(authHeaders[1]).toBe('Bearer fc-test-key');
+
+    const keyedScrape = await firecrawlKeylessScrape('https://huggingface.co/pricing', {
+      firecrawlBaseUrl: 'https://proxy.example/fc',
+      apiKey: 'fc-scrape-key',
+      fetchFn,
+    });
+    expect(keyedScrape.excerpt).toContain('$9/mo');
+    expect(authHeaders[2]).toBe('Bearer fc-scrape-key');
+
     const rateLimited = await firecrawlKeylessScrape('https://huggingface.co/pricing', { fetchFn });
+    expect(requestedUrls[3]).toBe('https://api.firecrawl.dev/v2/scrape');
+    expect(authHeaders[3]).toBeNull();
     expect(rateLimited.rateLimited).toBe(true);
     expect(rateLimited.error).toContain('429');
     expect(rateLimited.error).toContain('15s');
 
+    returnArrayCompat = false;
     const webAdapter = new WebDemoAdapter({
       allowNetwork: true,
       researchProvider: 'firecrawl-keyless',
@@ -527,5 +566,6 @@ describe('HTML->Markdown Distiller, BM25 Ranker, and SERP Parsers', () => {
     );
     expect(adapterOut.ok).toBe(true);
     expect(adapterOut.formatted).toContain('Official Pro and Team pricing plans.');
+    expect(authHeaders[4]).toBeNull();
   });
 });

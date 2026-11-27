@@ -11,6 +11,8 @@ export const DEFAULT_FIRECRAWL_BASE_URL = 'https://api.firecrawl.dev';
 export interface FirecrawlKeylessOptions {
   /** Base URL for Firecrawl API or same-origin proxy (e.g. `https://api.firecrawl.dev` or `/api/firecrawl`). */
   firecrawlBaseUrl?: string;
+  /** Optional API key; omitted in keyless mode so no Authorization header is sent. */
+  apiKey?: string;
   fetchFn?: typeof fetch;
   timeoutMs?: number;
 }
@@ -66,15 +68,20 @@ async function postFirecrawlJson(
   const controller = new AbortController();
   const timeoutMs = options?.timeoutMs ?? 12000;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const apiKey = options?.apiKey?.trim();
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json',
+  };
+  if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
   try {
-    // Keyless mode: never attach an API key or Authorization header.
+    // Keyless mode: attach Authorization only when apiKey is explicitly provided.
     const res = await fetchFn(endpointUrl, {
       method: 'POST',
       signal: controller.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
+      headers,
       body: JSON.stringify(payload),
     });
 
@@ -128,7 +135,8 @@ function normalizeDocToMarkdown(doc: FirecrawlRawDoc, url: string): { title: str
 }
 
 /**
- * Queries Firecrawl Keyless `/v1/search` without an API key and returns cleaned search + excerpt data.
+ * Queries Firecrawl Keyless `/v2/search` without an API key (unless `apiKey` is explicitly
+ * provided) and returns cleaned search + excerpt data.
  */
 export async function firecrawlKeylessSearch(
   query: string,
@@ -140,7 +148,7 @@ export async function firecrawlKeylessSearch(
   const maxCharsPerSource = options?.maxCharsPerSource ?? 1800;
 
   const res = await postFirecrawlJson(
-    `${baseUrl}/v1/search`,
+    `${baseUrl}/v2/search`,
     {
       query,
       limit,
@@ -161,7 +169,12 @@ export async function firecrawlKeylessSearch(
     };
   }
 
-  const rawRows = Array.isArray(res.json.data) ? (res.json.data as FirecrawlRawDoc[]) : [];
+  const dataField = res.json.data as { web?: unknown } | FirecrawlRawDoc[] | undefined;
+  const rawRows: FirecrawlRawDoc[] = Array.isArray(dataField)
+    ? dataField
+    : Array.isArray(dataField?.web)
+      ? (dataField.web as FirecrawlRawDoc[])
+      : [];
   const results: SearchResultItem[] = [];
   const scrapedSources: FetchedSourceResult[] = [];
 
@@ -210,7 +223,8 @@ export async function firecrawlKeylessSearch(
 }
 
 /**
- * Scrapes a single URL via Firecrawl Keyless `/v1/scrape` without an API key.
+ * Scrapes a single URL via Firecrawl Keyless `/v2/scrape` without an API key (unless `apiKey`
+ * is explicitly provided).
  */
 export async function firecrawlKeylessScrape(
   url: string,
@@ -219,7 +233,7 @@ export async function firecrawlKeylessScrape(
   const baseUrl = normalizeBaseUrl(options?.firecrawlBaseUrl);
   const maxChars = options?.maxCharsPerSource ?? 1800;
   const res = await postFirecrawlJson(
-    `${baseUrl}/v1/scrape`,
+    `${baseUrl}/v2/scrape`,
     {
       url,
       formats: ['markdown'],
